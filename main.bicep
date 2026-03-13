@@ -40,6 +40,13 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
           addressPrefix: '10.0.1.0/24'
         }
       }
+      {
+        // Private endpoint for blob storage
+        name: 'PrivateEndpointSubnet'
+        properties: {
+          addressPrefix: '10.0.2.0/24'
+        }
+      }
     ]
   }
 }
@@ -62,7 +69,7 @@ resource publicIp 'Microsoft.Network/publicIPAddresses@2024-01-01' = {
   }
 }
 
-// Storage Account — no anonymous/public blob access; accessed via SAS URL
+// Storage Account — private; access only via private endpoint from the VNet
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
@@ -74,7 +81,12 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
     allowBlobPublicAccess: false
-    publicNetworkAccess: 'Enabled' // must remain reachable from App Gateway backend
+    // Public internet access disabled — all traffic flows through the private endpoint
+    publicNetworkAccess: 'Disabled'
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'None'
+    }
   }
 }
 
@@ -89,6 +101,61 @@ resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@20
   name: containerName
   properties: {
     publicAccess: 'None'
+  }
+}
+
+// Private Endpoint — exposes the blob service on a NIC inside PrivateEndpointSubnet
+resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: 'pe-${storageAccountName}-blob'
+  location: location
+  properties: {
+    subnet: {
+      id: vnet.properties.subnets[1].id
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'pe-${storageAccountName}-blob-conn'
+        properties: {
+          privateLinkServiceId: storageAccount.id
+          groupIds: ['blob']
+        }
+      }
+    ]
+  }
+}
+
+// Private DNS Zone — resolves <account>.blob.core.windows.net to the private endpoint IP
+resource privateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.blob.${environment().suffixes.storage}'
+  location: 'global'
+}
+
+// Link the DNS zone to the VNet so the App Gateway DNS resolution uses the private IP
+resource dnsVnetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: privateDnsZone
+  name: 'link-${vnetName}'
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: vnet.id
+    }
+    registrationEnabled: false
+  }
+}
+
+// DNS zone group: auto-registers an A record for the private endpoint NIC IP
+resource dnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: privateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink-blob'
+        properties: {
+          privateDnsZoneId: privateDnsZone.id
+        }
+      }
+    ]
   }
 }
 

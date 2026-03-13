@@ -103,6 +103,21 @@ echo "  Waiting 30s for RBAC propagation..."
 sleep 30
 
 echo ""
+echo "=== Temporarily enabling public network access for CLI operations ==="
+# The storage account is private (publicNetworkAccess=Disabled) — the App Gateway
+# reaches it via private endpoint. However the Azure CLI (running on this machine)
+# also needs temporary public access to upload the blob and sign the SAS token.
+# We re-enable it here and restore private access afterwards.
+az storage account update \
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$STORAGE_ACCOUNT" \
+  --public-network-access Enabled \
+  --default-action Allow \
+  --output none
+echo "  Waiting 15s for network rule propagation..."
+sleep 15
+
+echo ""
 echo "=== Uploading prisma.txt to blob storage ==="
 # Key-based auth is disabled on the subscription — use Entra ID (login) auth throughout
 echo "Prisma Downloaded" > /tmp/prisma.txt
@@ -134,23 +149,30 @@ SAS_TOKEN=$(az storage blob generate-sas \
   --as-user \
   --output tsv)
 
-DIRECT_URL="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER}/prisma.txt?${SAS_TOKEN}"
+echo ""
+echo "=== Re-disabling public network access ==="
+az storage account update \
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$STORAGE_ACCOUNT" \
+  --public-network-access Disabled \
+  --default-action Deny \
+  --output none
+echo "  Storage account is private again."
+
 APPGW_URL="http://${APPGW_FQDN}/${CONTAINER}/prisma.txt?${SAS_TOKEN}"
 
 echo ""
 echo "---------------------------------------------------------------------"
-echo "1) Direct HTTPS URL (baseline — confirm the file is readable):"
-echo ""
-echo "   $DIRECT_URL"
-echo ""
+echo "Storage account is PRIVATE — public internet access is blocked."
+echo "The only path to the blob is through the App Gateway private endpoint."
 echo "---------------------------------------------------------------------"
-echo "2) Via App Gateway URL (replicates the DLP redirect — open in Edge):"
+echo ""
+echo "Via App Gateway URL (replicates the DLP redirect — open in Edge):"
 echo ""
 echo "   $APPGW_URL"
 echo ""
 echo "---------------------------------------------------------------------"
-echo "Both URLs are valid for 24 hours. Paste either into Edge to download."
+echo "URL is valid for 24 hours. Paste into Edge to download prisma.txt."
 echo ""
-echo "Quick curl tests:"
-echo "  curl -v '$DIRECT_URL'"
+echo "Quick curl test (must be run from within the VNet):"
 echo "  curl -v '$APPGW_URL'"
