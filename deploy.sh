@@ -103,19 +103,31 @@ echo "  Waiting 30s for RBAC propagation..."
 sleep 30
 
 echo ""
-echo "=== Temporarily enabling public network access for CLI operations ==="
-# The storage account is private (publicNetworkAccess=Disabled) — the App Gateway
-# reaches it via private endpoint. However the Azure CLI (running on this machine)
-# also needs temporary public access to upload the blob and sign the SAS token.
-# We re-enable it here and restore private access afterwards.
+echo "=== Temporarily allowing this machine's IP on the storage firewall ==="
+# The storage account is private (publicNetworkAccess=Disabled, defaultAction=Deny).
+# The App Gateway reaches it via private endpoint — that stays unchanged.
+# For the CLI upload and SAS generation we add only this machine's public IP
+# to the storage network allowlist (far narrower than opening everything).
+MY_IP=$(curl -s --max-time 10 https://api.ipify.org)
+echo "  Detected public IP: $MY_IP"
+
+# Enable public network access (required for IP-based rules to take effect)
+# but keep defaultAction=Deny so only the allowlisted IP is permitted.
 az storage account update \
   --resource-group "$RESOURCE_GROUP" \
   --name "$STORAGE_ACCOUNT" \
   --public-network-access Enabled \
-  --default-action Allow \
+  --default-action Deny \
   --output none
-echo "  Waiting 15s for network rule propagation..."
-sleep 15
+
+az storage account network-rule add \
+  --resource-group "$RESOURCE_GROUP" \
+  --account-name "$STORAGE_ACCOUNT" \
+  --ip-address "$MY_IP" \
+  --output none
+
+echo "  Waiting 45s for firewall rule propagation..."
+sleep 45
 
 echo ""
 echo "=== Uploading prisma.txt to blob storage ==="
@@ -150,14 +162,20 @@ SAS_TOKEN=$(az storage blob generate-sas \
   --output tsv)
 
 echo ""
-echo "=== Re-disabling public network access ==="
+echo "=== Restoring private-only access on storage account ==="
+az storage account network-rule remove \
+  --resource-group "$RESOURCE_GROUP" \
+  --account-name "$STORAGE_ACCOUNT" \
+  --ip-address "$MY_IP" \
+  --output none
+
 az storage account update \
   --resource-group "$RESOURCE_GROUP" \
   --name "$STORAGE_ACCOUNT" \
   --public-network-access Disabled \
   --default-action Deny \
   --output none
-echo "  Storage account is private again."
+echo "  Storage account is private again (IP rule removed)."
 
 APPGW_URL="http://${APPGW_FQDN}/${CONTAINER}/prisma.txt?${SAS_TOKEN}"
 
